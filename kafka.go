@@ -123,7 +123,7 @@ func (k *kafka) collect() {
 	var wg = sync.WaitGroup{}
 	clusterBrokers.set(float64(len(k.client.Brokers())))
 	for _, b := range k.client.Brokers() {
-		clusterBrokerInfo.set(1, b.Addr(), fmt.Sprint(b.ID()))
+		go clusterBrokerInfo.set(1, b.Addr(), fmt.Sprint(b.ID()))
 	}
 
 	offset := make(map[string]map[int32]int64)
@@ -157,62 +157,60 @@ func (k *kafka) collect() {
 			return
 		}
 
-		topicPartitions.set(float64(len(partitions)), topic)
+		go topicPartitions.set(float64(len(partitions)), topic)
 
 		k.mutex.Lock()
 		offset[topic] = make(map[int32]int64, len(partitions))
 		k.mutex.Unlock()
 
 		for _, partition := range partitions {
-			broker, err := k.client.Leader(topic, partition)
-			if err != nil {
-				slog.Error("Cannot get leader", slog.String("topic", topic), slog.String("partition", fmt.Sprint(partition)), slog.String("error", err.Error()))
-			} else {
-				topicPartitionLeader.set(float64(broker.ID()), topic, fmt.Sprint(partition))
+			if topicPartitionLeader.enabled {
+				broker, err := k.client.Leader(topic, partition)
+				if err != nil {
+					slog.Error("Cannot get leader", slog.String("topic", topic), slog.String("partition", fmt.Sprint(partition)), slog.String("error", err.Error()))
+				} else {
+					go topicPartitionLeader.set(float64(broker.ID()), topic, fmt.Sprint(partition))
+				}
 			}
 
-			currentOffset, err := k.client.GetOffset(topic, partition, sarama.OffsetNewest)
-			if err != nil {
-				slog.Error("Cannot get current offset", slog.String("topic", topic), slog.String("partition", fmt.Sprint(partition)), slog.String("error", err.Error()))
-			} else {
-				k.mutex.Lock()
-				offset[topic][partition] = currentOffset
-				k.mutex.Unlock()
+			if topicCurrentOffset.enabled || consumergroupLag.enabled {
+				currentOffset, err := k.client.GetOffset(topic, partition, sarama.OffsetNewest)
+				if err != nil {
+					slog.Error("Cannot get current offset", slog.String("topic", topic), slog.String("partition", fmt.Sprint(partition)), slog.String("error", err.Error()))
+				} else {
+					k.mutex.Lock()
+					offset[topic][partition] = currentOffset
+					k.mutex.Unlock()
 
-				topicCurrentOffset.set(float64(currentOffset), topic, fmt.Sprint(partition))
+					go topicCurrentOffset.set(float64(currentOffset), topic, fmt.Sprint(partition))
+				}
 			}
 
-			oldestOffset, err := k.client.GetOffset(topic, partition, sarama.OffsetOldest)
-			if err != nil {
-				slog.Error("Cannot get oldest offset", slog.String("topic", topic), slog.String("partition", fmt.Sprint(partition)), slog.String("error", err.Error()))
-			} else {
-				topicOldestOffset.set(float64(oldestOffset), topic, fmt.Sprint(partition))
+			if topicOldestOffset.enabled {
+				oldestOffset, err := k.client.GetOffset(topic, partition, sarama.OffsetOldest)
+				if err != nil {
+					slog.Error("Cannot get oldest offset", slog.String("topic", topic), slog.String("partition", fmt.Sprint(partition)), slog.String("error", err.Error()))
+				} else {
+					go topicOldestOffset.set(float64(oldestOffset), topic, fmt.Sprint(partition))
+				}
 			}
 
-			replicas, err := k.client.Replicas(topic, partition)
-			if err != nil {
-				slog.Error("Cannot get replicas", slog.String("topic", topic), slog.String("partition", fmt.Sprint(partition)), slog.String("error", err.Error()))
-			} else {
-				topicPartitionReplicas.set(float64(len(replicas)), topic, fmt.Sprint(partition))
+			if topicPartitionReplicas.enabled {
+				replicas, err := k.client.Replicas(topic, partition)
+				if err != nil {
+					slog.Error("Cannot get replicas", slog.String("topic", topic), slog.String("partition", fmt.Sprint(partition)), slog.String("error", err.Error()))
+				} else {
+					go topicPartitionReplicas.set(float64(len(replicas)), topic, fmt.Sprint(partition))
+				}
 			}
 
-			inSyncReplicas, err := k.client.InSyncReplicas(topic, partition)
-			if err != nil {
-				slog.Error("Cannot get in-sync replicas", slog.String("topic", topic), slog.String("partition", fmt.Sprint(partition)), slog.String("error", err.Error()))
-			} else {
-				topicPartitionInSyncReplicas.set(float64(len(inSyncReplicas)), topic, fmt.Sprint(partition))
-			}
-
-			if broker != nil && replicas != nil && len(replicas) > 0 && broker.ID() == replicas[0] {
-				topicPartitionUsesPreferredReplica.set(float64(1), topic, fmt.Sprint(partition))
-			} else {
-				topicPartitionUsesPreferredReplica.set(float64(0), topic, fmt.Sprint(partition))
-			}
-
-			if replicas != nil && inSyncReplicas != nil && len(inSyncReplicas) < len(replicas) {
-				topicUnderReplicatedPartition.set(float64(1), topic, fmt.Sprint(partition))
-			} else {
-				topicUnderReplicatedPartition.set(float64(0), topic, fmt.Sprint(partition))
+			if topicUnderReplicatedPartition.enabled {
+				inSyncReplicas, err := k.client.InSyncReplicas(topic, partition)
+				if err != nil {
+					slog.Error("Cannot get in-sync replicas", slog.String("topic", topic), slog.String("partition", fmt.Sprint(partition)), slog.String("error", err.Error()))
+				} else {
+					go topicPartitionInSyncReplicas.set(float64(len(inSyncReplicas)), topic, fmt.Sprint(partition))
+				}
 			}
 		}
 	}
@@ -286,61 +284,60 @@ func (k *kafka) collect() {
 				}
 			}
 
-			consumergroupMembers.set(float64(len(group.Members)), group.GroupId)
+			go consumergroupMembers.set(float64(len(group.Members)), group.GroupId)
 
-			offsetFetchResponse, err := broker.FetchOffset(&offsetFetchRequest)
-			if err != nil {
-				slog.Error("Cannot get offset of consumer group", slog.String("consumergroup", group.GroupId), slog.String("error", err.Error()))
-				continue
-			}
-
-			for topic, partitions := range offsetFetchResponse.Blocks {
-				// If the topic is not consumed by that consumer group, skip it
-				topicConsumed := false
-				for _, offsetFetchResponseBlock := range partitions {
-					// Kafka will return -1 if there is no offset associated with a topic-partition under that consumer group
-					if offsetFetchResponseBlock.Offset != -1 {
-						topicConsumed = true
-						break
-					}
-				}
-				if !topicConsumed {
+			if consumergroupCurrentOffset.enabled || consumergroupLag.enabled {
+				offsetFetchResponse, err := broker.FetchOffset(&offsetFetchRequest)
+				if err != nil {
+					slog.Error("Cannot get offset of consumer group", slog.String("consumergroup", group.GroupId), slog.String("error", err.Error()))
 					continue
 				}
 
-				var currentOffsetSum int64
-				var lagSum int64
-				for partition, offsetFetchResponseBlock := range partitions {
-					err := offsetFetchResponseBlock.Err
-					if err != sarama.ErrNoError {
-						slog.Error("Error fetching consumer offsets for partition", slog.String("partition", fmt.Sprint(partition)), slog.String("error", err.Error()))
+				for topic, partitions := range offsetFetchResponse.Blocks {
+					// If the topic is not consumed by that consumer group, skip it
+					topicConsumed := false
+					for _, offsetFetchResponseBlock := range partitions {
+						// Kafka will return -1 if there is no offset associated with a topic-partition under that consumer group
+						if offsetFetchResponseBlock.Offset != -1 {
+							topicConsumed = true
+							break
+						}
+					}
+					if !topicConsumed {
 						continue
 					}
-					currentOffset := offsetFetchResponseBlock.Offset
-					currentOffsetSum += currentOffset
 
-					consumergroupCurrentOffset.set(float64(currentOffset), group.GroupId, topic, fmt.Sprint(partition))
-
-					k.mutex.Lock()
-					if offset, ok := offset[topic][partition]; ok {
-						// If the topic is consumed by that consumer group, but no offset associated with the partition
-						// forcing lag to -1 to be able to alert on that
-						var lag int64
-						if offsetFetchResponseBlock.Offset == -1 {
-							lag = -1
-						} else {
-							lag = offset - offsetFetchResponseBlock.Offset
-							lagSum += lag
+					for partition, offsetFetchResponseBlock := range partitions {
+						err := offsetFetchResponseBlock.Err
+						if err != sarama.ErrNoError {
+							slog.Error("Error fetching consumer offsets for partition", slog.String("partition", fmt.Sprint(partition)), slog.String("error", err.Error()))
+							continue
 						}
+						currentOffset := offsetFetchResponseBlock.Offset
 
-						consumergroupLag.set(float64(lag), group.GroupId, topic, fmt.Sprint(partition))
-					} else {
-						slog.Error("Cannot get consumer group lag", slog.String("consumergroup", group.GroupId), slog.String("topic", topic), slog.String("partition", fmt.Sprint(partition)))
+						go consumergroupCurrentOffset.set(float64(currentOffset), group.GroupId, topic, fmt.Sprint(partition))
+
+						k.mutex.Lock()
+						if offset, ok := offset[topic][partition]; ok {
+							// If the topic is consumed by that consumer group, but no offset associated with the partition
+							// forcing lag to -1 to be able to alert on that
+							var lag int64
+							if offsetFetchResponseBlock.Offset == -1 {
+								lag = -1
+							} else {
+								lag = offset - offsetFetchResponseBlock.Offset
+								if lag < 0 {
+									lag = 0
+								}
+							}
+
+							go consumergroupLag.set(float64(lag), group.GroupId, topic, fmt.Sprint(partition))
+						} else {
+							slog.Error("Cannot get consumer group lag", slog.String("consumergroup", group.GroupId), slog.String("topic", topic), slog.String("partition", fmt.Sprint(partition)))
+						}
+						k.mutex.Unlock()
 					}
-					k.mutex.Unlock()
 				}
-				consumergroupCurrentOffsetSum.set(float64(currentOffsetSum), group.GroupId, topic)
-				consumergroupLagSum.set(float64(lagSum), group.GroupId, topic)
 			}
 		}
 	}
