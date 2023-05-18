@@ -85,7 +85,7 @@ func parseConfig() (*config, error) {
 	})
 
 	httpTlsUseMutualAuthArg := p.Flag("", "http.tls.use.mutual.auth", &argparse.Options{
-		Help:    "Use TLS mutual authentication for Protmetheus endpoint",
+		Help:    "Use TLS mutual authentication for Prometheus endpoint",
 		Default: false,
 	})
 
@@ -95,7 +95,7 @@ func parseConfig() (*config, error) {
 	})
 
 	kafkaVersionArg := p.String("", "kafka.version", &argparse.Options{
-		Help:    "Minimum Kafka client API verion",
+		Help:    "Minimum Kafka client API version",
 		Default: sarama.V2_0_0_0.String(),
 	})
 
